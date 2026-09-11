@@ -44,8 +44,9 @@ def generate_offline_bundle():
                     "data": b64
                 })
 
-    ignored_files = {"index.html", "webforge_offline.html", "minecraft-web.js"}
-    ignored_exts = {".py", ".html"}
+    ignored_files = {"index.html", "webfabric_offline.html", "minecraft-web.js",
+                     "README.md", ".gitignore"}
+    ignored_exts = {".py", ".html", ".md"}
 
     for item in sorted(os.listdir(root_dir)):
         item_path = os.path.join(root_dir, item)
@@ -157,35 +158,13 @@ def generate_offline_bundle():
         f'{post_init_code}\n      const lib = await cheerpjRunLibrary("");'
     )
 
-    post_lib_code = """
-      const initFiles = await lib.java.nio.file.Files;
-      const initPaths = await lib.java.nio.file.Paths;
-      const initCopyOption = await lib.java.nio.file.StandardCopyOption;
+    # Nothing is copied into /app/ here on purpose. /app/ is CheerpJ's read-only,
+    # HTTP-backed mount, so those writes could never succeed; the first one threw and
+    # left the Java side mid-call, which broke every lib call that followed it with
+    # "Java code still running". The natives are already embedded at /str/lwjgl.js and
+    # java.library.path is rewritten to /str above, so there is nothing left to do.
 
-      for (const file of OFFLINE_FILES) {
-        try {
-          const srcPath = file.path;
-          const filename = srcPath.replace("/str/", "");
-          const appTarget = await initPaths.get(`/app/${filename}`);
-          await initFiles.createDirectories(appTarget.getParent());
-          await initFiles.copy(await initPaths.get(srcPath), appTarget, [initCopyOption.REPLACE_EXISTING]);
-
-          if (filename === "lwjgl.js" || filename === "jawt.js") {
-            const nativeTarget = await initPaths.get(`/app/natives/${filename}`);
-            await initFiles.createDirectories(nativeTarget.getParent());
-            await initFiles.copy(await initPaths.get(srcPath), nativeTarget, [initCopyOption.REPLACE_EXISTING]);
-          }
-        } catch (err) {
-          console.warn("fs pre-copy notice:", err);
-        }
-      }
-"""
-    html_content = html_content.replace(
-        'const lib = await cheerpjRunLibrary("");',
-        f'const lib = await cheerpjRunLibrary("");\n{post_lib_code}'
-    )
-
-    out_path = os.path.join(root_dir, "webforge_offline.html")
+    out_path = os.path.join(root_dir, "webfabric_offline.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 

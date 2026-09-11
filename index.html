@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebForge</title>
+    <title>WebFabric</title>
     <link rel="icon" type="image/x-icon" href="./favicon.ico">
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
@@ -31,12 +31,22 @@
         justify-content: center;
         align-items: center;
       }
+      .hint {
+        font-size: 12px;
+        opacity: 0.65;
+        max-width: 60ch;
+      }
     </style>
   </head>
   <body>
 
     <div id="launcher-menu">
-      <h2>WebForge Launcher v9 - Made by Cucuzacu</h2>
+      <h2>WebFabric Launcher v10 - Made by Cucuzacu</h2>
+      <p class="hint">
+        Minecraft 1.6.4 on LegacyFabric with Fabric Loader 0.18.2.
+        Mods are bundled with the launcher, so there is nothing to upload.
+        Graphics start on low settings for speed - change them in Options once you are in.
+      </p>
 
       <div>
         <label for="username-input">Username: </label>
@@ -46,22 +56,14 @@
       <br>
 
       <div>
-        <label for="mod-upload">Select Mods (.jar): </label>
-        <br><br>
-        <input type="file" id="mod-upload" multiple accept=".jar,.zip">
-      </div>
-      <br>
-
-      <div>
         <label for="resourcepack-upload">Select Resourcepacks (.zip): </label>
         <br><br>
         <input type="file" id="resourcepack-upload" multiple accept=".zip">
       </div>
-      
-      <button id="upload-btn">1. Upload Mods</button>
-      <button id="upload-resourcepack-btn">2. Upload Resourcepacks</button>
+
+      <button id="upload-resourcepack-btn">1. Upload Resourcepacks</button>
       <br>
-      <button id="start-btn" disabled>3. Start Game</button>
+      <button id="start-btn" disabled>2. Start Game</button>
 
       <div id="status">Initializing Cheerpj...</div>
     </div>
@@ -74,9 +76,7 @@
       import MinecraftClient from "./minecraft-web.js";
 
       const statusText = document.getElementById("status");
-      const modInput = document.getElementById("mod-upload");
       const resourcepackInput = document.getElementById("resourcepack-upload");
-      const uploadBtn = document.getElementById("upload-btn");
       const uploadResourcepackBtn = document.getElementById("upload-resourcepack-btn");
       const startBtn = document.getElementById("start-btn");
       const menu = document.getElementById("launcher-menu");
@@ -85,73 +85,36 @@
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
       await cheerpjInit({
-        version: 8,
+        version: MinecraftClient.JAVA_VERSION,
         javaProperties: [
           `java.library.path=${nativesPath}`,
-          "org.lwjgl.util.NoChecks=true", 
-          "fml.ignoreInvalidMinecraftCertificates=true"
+          "org.lwjgl.util.NoChecks=true",
+          `java.class.path=${MinecraftClient.CLASSPATH}`,
+          ...MinecraftClient.FABRIC_PROPERTIES,
         ],
       });
       const lib = await cheerpjRunLibrary("");
 
-      statusText.innerText = "Ready. You can upload mods/resourcepacks or start.";
+      statusText.innerText = "Installing bundled mods...";
+      try {
+        await MinecraftClient.installBundledMods(lib, (message) => {
+          statusText.innerText = message;
+        });
+        statusText.innerText = "Ready. You can upload resourcepacks or start.";
+      } catch (error) {
+        console.error("Could not install the bundled mods:", error);
+        statusText.innerText = "Warning: could not install the bundled mods. See console.";
+      }
+
       startBtn.disabled = false;
-
-      uploadBtn.addEventListener("click", async () => {
-        if (modInput.files.length === 0) {
-          alert("Please select at least one mod file!");
-          return;
-        }
-        
-        uploadBtn.disabled = true;
-        uploadResourcepackBtn.disabled = true;
-        startBtn.disabled = true;
-        statusText.innerText = "Preparing fs...";
-
-        try {
-          const Files = await lib.java.nio.file.Files;
-          const Paths = await lib.java.nio.file.Paths;
-          const StandardCopyOption = await lib.java.nio.file.StandardCopyOption;
-
-          const modsDir = await Paths.get("/files/game/mods");
-          await Files.createDirectories(modsDir);
-
-          for (const file of modInput.files) {
-            statusText.innerText = `Uploading: ${file.name}...`;
-
-            const arrayBuffer = await file.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-
-            const strPath = `/str/${file.name}`;
-            cheerpOSAddStringFile(strPath, uint8Array);
-
-            const source = await Paths.get(strPath);
-            const target = await Paths.get(`/files/game/mods/${file.name}`);
-            
-            await Files.copy(source, target, [StandardCopyOption.REPLACE_EXISTING]);
-            console.log(`Successfully moved ${file.name} to /files/game/mods/`);
-          }
-
-          statusText.innerText = "All mods uploaded! Ready to start.";
-          uploadBtn.innerText = "Uploaded ✓";
-        } catch (error) {
-          console.error("Upload failed:", error);
-          statusText.innerText = "Error uploading mods. See console.";
-        } finally {
-          startBtn.disabled = false;
-          uploadBtn.disabled = false;
-          uploadResourcepackBtn.disabled = false;
-        }
-      });
 
       uploadResourcepackBtn.addEventListener("click", async () => {
         if (resourcepackInput.files.length === 0) {
           alert("Please select at least one resourcepack file!");
           return;
         }
-        
+
         uploadResourcepackBtn.disabled = true;
-        uploadBtn.disabled = true;
         startBtn.disabled = true;
         statusText.innerText = "Preparing fs...";
 
@@ -174,7 +137,7 @@
 
             const source = await Paths.get(strPath);
             const target = await Paths.get(`/files/game/resourcepacks/${file.name}`);
-            
+
             await Files.copy(source, target, [StandardCopyOption.REPLACE_EXISTING]);
             console.log(`Successfully moved ${file.name} to /files/game/resourcepacks/`);
           }
@@ -187,7 +150,6 @@
         } finally {
           startBtn.disabled = false;
           uploadResourcepackBtn.disabled = false;
-          uploadBtn.disabled = false;
         }
       });
 
@@ -196,9 +158,9 @@
       startBtn.addEventListener("click", () => {
         menu.style.display = "none";
         gameContainer.style.display = "flex";
-  
+
         MinecraftClient.register();
-  
+
         const clientElement = document.querySelector("minecraft-client");
         const username = usernameInput.value || "Player";
         clientElement.run(username);

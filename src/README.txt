@@ -1,1 +1,0 @@
-StupidForgeLauncher.java is compiled and injected directly into the original jar.

@@ -384,15 +384,94 @@ function drawArraysImpl(mode, first, count)
 		debugger;
 	}
 }
+// Geometry compiled into a display list gets its own GPU buffer. Minecraft rebuilds a
+// chunk's list only when its blocks change, but replays it every single frame, so going
+// through uploadAllData here would re-copy every chunk's vertices from CPU to GPU on each
+// glCallList. Uploading once and just rebinding afterwards is what a real display list
+// does, and it is the difference between a few hundred bufferSubData calls per frame and
+// none at all.
 function pushDrawArraysInList(list, v, mode, first, count)
 {
-	var args = [mode, first, count, captureData(v, vertexData, count), captureData(v, colorData, count), captureData(v, texCoordData, count), captureData(v, normalData, count)];
-	list.push({f: drawArraysInList, a: args});
+	var batch = {
+		mode: mode,
+		first: first,
+		count: count,
+		attribs: [
+			{ loc: vertexPosition, data: captureData(v, vertexData, count), offset: -1 },
+			{ loc: colorLocation,  data: captureData(v, colorData, count), offset: -1 },
+			{ loc: texCoord,       data: captureData(v, texCoordData, count), offset: -1 },
+			{ loc: normalLocation, data: captureData(v, normalData, count), offset: -1 },
+		],
+		vbo: null,
+	};
+	list.push({f: drawArraysInList, a: [batch], batch: batch});
 }
-function drawArraysInList(mode, first, count, capturedVertexData, capturedColorData, capturedTexCoordData, capturedNormalData)
+// Packs the captured attribute arrays end to end into one static buffer. Called once,
+// the first time the list is replayed.
+function uploadBatch(batch)
 {
-    uploadAllData(null, count, capturedVertexData, capturedColorData, capturedTexCoordData, capturedNormalData);
-    drawArraysImpl(mode, first, count);
+	var total = 0;
+	for(var i = 0; i < batch.attribs.length; i++)
+	{
+		var a = batch.attribs[i];
+		if(a.data.enabled && a.data.buf)
+		{
+			a.offset = total;
+			total += a.data.buf.length;
+		}
+	}
+
+	var merged = new Uint8Array(total);
+	for(var i = 0; i < batch.attribs.length; i++)
+	{
+		var a = batch.attribs[i];
+		if(a.offset >= 0)
+		{
+			merged.set(a.data.buf, a.offset);
+			a.data.buf = null; // the GPU owns this now, drop the CPU copy
+		}
+	}
+
+	batch.vbo = glCtx.createBuffer();
+	glCtx.bindBuffer(glCtx.ARRAY_BUFFER, batch.vbo);
+	glCtx.bufferData(glCtx.ARRAY_BUFFER, merged, glCtx.STATIC_DRAW);
+}
+function drawArraysInList(batch)
+{
+	if(batch.vbo === null) uploadBatch(batch);
+	else glCtx.bindBuffer(glCtx.ARRAY_BUFFER, batch.vbo);
+
+	for(var i = 0; i < batch.attribs.length; i++)
+	{
+		var a = batch.attribs[i];
+		if(a.offset >= 0)
+		{
+			var d = a.data;
+			glCtx.vertexAttribPointer(a.loc, d.size, d.type, d.type !== glCtx.FLOAT, d.stride, a.offset);
+			glCtx.enableVertexAttribArray(a.loc);
+		}
+		else
+		{
+			glCtx.disableVertexAttribArray(a.loc);
+			if(a.loc === texCoord) glCtx.vertexAttrib2f(texCoord, 0, 0);
+		}
+	}
+
+	drawArraysImpl(batch.mode, batch.first, batch.count);
+}
+// Releases the GPU buffers a list owns. Minecraft recompiles a chunk's list on every
+// block change, so without this each rebuild would leak a buffer.
+function freeListBuffers(list)
+{
+	for(var i = 0; i < list.length; i++)
+	{
+		var b = list[i].batch;
+		if(b && b.vbo !== null)
+		{
+			glCtx.deleteBuffer(b.vbo);
+			b.vbo = null;
+		}
+	}
 }
 // Fix the sampler to texture unit 0
 glCtx.uniform1i(samplerLocation, 0);
@@ -1135,7 +1214,9 @@ function Java_org_lwjgl_opengl_GL11_nglNewList(lib, list, mode, funcPtr)
 	checkNoList(curList);
 	assert(mode == 0x1300/*GL_COMPILE*/);
 	curList = cmdLists[list];
-	// Wipe out the current contents of the list if any
+	// Wipe out the current contents of the list if any, handing back any geometry
+	// buffers it owned first.
+	freeListBuffers(curList);
 	curList.length = 0;
 }
 
