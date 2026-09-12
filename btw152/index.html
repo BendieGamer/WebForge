@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en" style="width:100%;height:100%;overflow:hidden;background:#fff;color:#000;font-family:sans-serif;">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WebBTW (1.5.2)</title>
+    <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
+    <style>
+      button { padding: 10px 20px; margin-top: 15px; cursor: pointer; background:#4CAF50; color:#000; font-size:16px; }
+      button:disabled { background:#666; cursor:not-allowed; }
+      #status { margin-top: 15px; font-size: 14px; }
+      #game-container { display:none; width:100%; height:100%; justify-content:center; align-items:center; }
+      .hint { font-size:12px; opacity:.65; max-width:70ch; }
+    </style>
+  </head>
+  <body>
+    <div id="menu">
+      <h2>Better Than Wolves CE 2.1.4 on Minecraft 1.5.2</h2>
+      <p class="hint">
+        A jar-mod build: BTW's classes are merged straight into the vanilla 1.5.2 jar.
+        No Fabric, no Mixin, no mod loader - so none of the JVM hacking that makes
+        BTW:CE 3.x impossible in a browser is involved here.
+      </p>
+      <div><label for="username">Username: </label><br><input id="username" value="Player"></div>
+      <button id="start-btn" disabled>Start Game</button>
+      <div id="status">Initializing CheerpJ...</div>
+    </div>
+
+    <div id="game-container">
+      <canvas id="game" width="854" height="480" tabindex="-1"></canvas>
+      <div id="display" style="width:100%;height:100%;position:absolute;top:0;left:0;visibility:hidden;"></div>
+    </div>
+
+    <script type="module">
+      const params = new URLSearchParams(location.search);
+      // 1.5.2 can be entered through either main class; pick with ?main=
+      const MAIN = params.get("main") || "WebBtwLauncher";
+
+      const JARS = [
+        "webbtw-launcher.jar",
+        "minecraft-1.5.2-btw.jar",
+        "minecraft-1.5.2-libraries.jar",
+        "lwjgl-2.9.0.jar",
+        "lwjgl_util-2.9.0.jar",
+      ];
+      const CLASSPATH = JARS.map((j) => `/str/${j}`).join(":");
+      // 1.5.2 resolves its own directory from the home directory, which CheerpJ reports as
+      // /files, so the game uses /files/.minecraft no matter what --gameDir says. The tree
+      // has to exist up front: BTW writes its addon config during startup and File
+      // .createNewFile() fails if the parent directories are missing.
+      const GAME_DIR = "/files/.minecraft";
+      const GAME_SUBDIRS = ["config", "mods", "saves", "resourcepacks"];
+      const ADDON_PREFIXES = ["BTW"];
+
+      const statusText = document.getElementById("status");
+      const startBtn = document.getElementById("start-btn");
+      const menu = document.getElementById("menu");
+      const container = document.getElementById("game-container");
+      const canvas = document.getElementById("game");
+
+      // The natives are copied into /str rather than read from /app, because /app is
+      // fetched over HTTP with range requests and plain static servers (python's
+      // http.server included) do not support the Range header, which CheerpJ requires.
+      const NATIVES = ["lwjgl.js", "jawt.js"];
+
+      await cheerpjInit({
+        version: 8,
+        javaProperties: [
+          "java.library.path=/str",
+          "org.lwjgl.util.NoChecks=true",
+          `java.class.path=${CLASSPATH}`,
+          `user.dir=${GAME_DIR}`,
+        ],
+      });
+      cheerpjCreateDisplay(-1, -1, document.getElementById("display"));
+      const lib = await cheerpjRunLibrary("");
+
+      statusText.innerText = `Ready (main class: ${MAIN})`;
+      startBtn.disabled = false;
+
+      startBtn.addEventListener("click", async () => {
+        startBtn.disabled = true;
+        const username = document.getElementById("username").value || "Player";
+
+        try {
+          const Files = await lib.java.nio.file.Files;
+          const Paths = await lib.java.nio.file.Paths;
+          await Files.createDirectories(await Paths.get(GAME_DIR));
+          for (const sub of GAME_SUBDIRS) {
+            await Files.createDirectories(await Paths.get(`${GAME_DIR}/${sub}`));
+          }
+
+          // BTW opens config/<prefix>.properties with a relative path and, when it is
+          // missing, falls back to File.createNewFile() - which CheerpJ rejects for
+          // relative paths even though it resolves them correctly. Creating the file up
+          // front through an absolute path (which does work) means the read succeeds and
+          // that path is never taken.
+          const File = await lib.java.io.File;
+          for (const prefix of ADDON_PREFIXES) {
+            const cfg = await new File(`${GAME_DIR}/config/${prefix}.properties`);
+            if (!(await cfg.exists())) await cfg.createNewFile();
+            console.log(`config ready: ${prefix}.properties`);
+          }
+        } catch (error) {
+          console.warn("Could not create the game directory:", error);
+        }
+
+        for (const native of NATIVES) {
+          statusText.innerText = `Loading ${native}...`;
+          // cache-busted: the shim changes during development and CheerpJ cannot run with
+          // HTTP caching disabled, so the query string is the only way to force a refetch.
+          const response = await fetch(new URL(`../natives/${native}?v=${Date.now()}`, import.meta.url).href);
+          cheerpOSAddStringFile(`/str/${native}`, new Uint8Array(await response.arrayBuffer()));
+        }
+
+        for (const jar of JARS) {
+          statusText.innerText = `Downloading ${jar}...`;
+          const response = await fetch(new URL(jar, import.meta.url).href);
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          cheerpOSAddStringFile(`/str/${jar}`, bytes);
+        }
+
+        statusText.innerText = "Starting...";
+        menu.style.display = "none";
+        container.style.display = "flex";
+        window.lwjglCanvasElement = canvas;
+
+        // 1.5.2's Main parses these with joptsimple and throws on anything it does not
+        // recognise, so the 1.6.4 argument set (--session, --version, --assetsDir) is
+        // not usable here. It is "sessionid", not "session".
+        const code = await cheerpjRunMain(
+          MAIN, CLASSPATH,
+          "--username", username,
+          "--sessionid", "0",
+          "--gameDir", GAME_DIR
+        );
+        console.log("exited with", code);
+      });
+    </script>
+  </body>
+</html>

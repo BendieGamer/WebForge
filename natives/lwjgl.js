@@ -341,7 +341,16 @@ function captureData(v, data, count)
 function checkNoList(list)
 {
 	if(list != null)
-		throw new Error("Unsupported command in list");
+	{
+		// Name the offending call: without it this only says a display list contains
+		// something unsupported, which is not enough to go and implement it.
+		var caller = "";
+		try {
+			var frames = (new Error()).stack.split(String.fromCharCode(10));
+			caller = (frames[2] || frames[1] || "").trim();
+		} catch (e) { }
+		throw new Error("Unsupported command in list: " + caller);
+	}
 }
 function pushInList(list, args, callee)
 {
@@ -390,6 +399,41 @@ function drawArraysImpl(mode, first, count)
 // glCallList. Uploading once and just rebinding afterwards is what a real display list
 // does, and it is the difference between a few hundred bufferSubData calls per frame and
 // none at all.
+// Snapshots a glBegin/glEnd block into the same batch shape display list vertex arrays
+// use, so replaying it goes through drawArraysInList and gets the one-off VBO upload.
+function captureImmediateBatch()
+{
+	var vBytes = immediateModeData.vertexPos * 4;
+	var cBytes = immediateModeData.colorPos * 4;
+	var tBytes = immediateModeData.texCoordPos * 4;
+	var nBytes = immediateModeData.normalPos * 4;
+
+	function capture(view, bytes, size)
+	{
+		return {
+			enabled: bytes > 0,
+			size: size,
+			type: glCtx.FLOAT,
+			stride: 0,
+			pointer: 0,
+			buf: bytes > 0 ? new Uint8Array(view.subarray(0, bytes)) : null,
+		};
+	}
+
+	return {
+		mode: immediateModeData.mode,
+		first: 0,
+		count: immediateModeData.vertexPos / 3,
+		attribs: [
+			{ loc: vertexPosition, data: capture(immediateVertexView, vBytes, 3), offset: -1 },
+			{ loc: colorLocation,  data: capture(immediateColorView, cBytes, 4), offset: -1 },
+			{ loc: texCoord,       data: capture(immediateTexCoordView, tBytes, 2), offset: -1 },
+			{ loc: normalLocation, data: capture(immediateNormalView, nBytes, 3), offset: -1 },
+		],
+		vbo: null,
+	};
+}
+
 function pushDrawArraysInList(list, v, mode, first, count)
 {
 	var batch = {
@@ -454,6 +498,7 @@ function drawArraysInList(batch)
 		{
 			glCtx.disableVertexAttribArray(a.loc);
 			if(a.loc === texCoord) glCtx.vertexAttrib2f(texCoord, 0, 0);
+			else if(a.loc === normalLocation) glCtx.vertexAttrib3f(normalLocation, 0.0, 0.0, 1.0);
 		}
 	}
 
@@ -476,6 +521,9 @@ function freeListBuffers(list)
 // Fix the sampler to texture unit 0
 glCtx.uniform1i(samplerLocation, 0);
 var curList = null;
+// Set between glBegin/glEnd while a display list is being compiled, so the immediate
+// mode calls accumulate into one recorded batch instead of being deferred individually.
+var recordingImmediate = false;
 var cmdLists = [null];
 // The first null implicitly solves resetting on 0 id
 var textureObjects = [null];
@@ -1184,7 +1232,7 @@ function Java_org_lwjgl_opengl_GL11_nglDisableClientState(lib, v, funcPtr) {
 
 function Java_org_lwjgl_opengl_GL11_nglColor4f(lib, r, g, b, a, funcPtr)
 {
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor4f);
+	if(curList && !recordingImmediate) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor4f);
 	immediateModeData.currentColor[0] = r;
 	immediateModeData.currentColor[1] = g;
 	immediateModeData.currentColor[2] = b;
@@ -1227,7 +1275,7 @@ function Java_org_lwjgl_opengl_GL11_nglEndList(lib, funcPtr)
 
 function Java_org_lwjgl_opengl_GL11_nglColor3f(lib, r, g, b, funcPtr)
 {
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor3f);
+	if(curList && !recordingImmediate) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor3f);
 	immediateModeData.currentColor[0] = r;
 	immediateModeData.currentColor[1] = g;
 	immediateModeData.currentColor[2] = b;
@@ -1437,6 +1485,24 @@ function setFogColorDirect(lib, r, g, b, a)
     glCtx.uniform4f(fogColorLocation, r, g, b, a);
 }
 
+function Java_org_lwjgl_opengl_GL11_nglGetTexParameteriv(lib, target, pname, memPtr, funcPtr)
+{
+	checkNoList(curList);
+	var v = lib.getJNIDataView();
+	var ptr = Number(memPtr);
+	var val = 0;
+	try {
+		var result = glCtx.getTexParameter(target, pname);
+		if (typeof result === "number") val = result;
+		else if (typeof result === "boolean") val = result ? 1 : 0;
+	} catch (e) {
+		// An unsupported pname is not worth failing the frame over; MCPatcher asks for
+		// GL_TEXTURE_MAX_LEVEL to decide how many mipmaps to build, and 0 means none.
+		val = 0;
+	}
+	v.setInt32(ptr, val, true);
+}
+
 function Java_org_lwjgl_opengl_GL11_nglGetTexLevelParameteriv(lib, target, level, pname, memPtr, funcPtr)
 {
 	checkNoList(curList);
@@ -1455,7 +1521,7 @@ function Java_org_lwjgl_opengl_GL11_nglGetTexLevelParameteriv(lib, target, level
 
 function Java_org_lwjgl_opengl_GL11_nglNormal3f(lib, nx, ny, nz, funcPtr)
 {
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglNormal3f);
+	if(curList && !recordingImmediate) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglNormal3f);
 	immediateModeData.currentNormal[0] = nx;
 	immediateModeData.currentNormal[1] = ny;
 	immediateModeData.currentNormal[2] = nz;
@@ -1562,7 +1628,7 @@ function Java_org_lwjgl_opengl_GL11_nglPolygonOffset(lib, factor, units, funcPtr
 
 function Java_org_lwjgl_opengl_GL11_nglBegin(lib, mode, funcPtr)
 {
-	checkNoList(curList);
+	if(curList) recordingImmediate = true;
 	immediateModeData.mode = mode;
 	immediateModeData.vertexPos = 0;
 	immediateModeData.texCoordPos = 0;
@@ -1572,7 +1638,7 @@ function Java_org_lwjgl_opengl_GL11_nglBegin(lib, mode, funcPtr)
 
 function Java_org_lwjgl_opengl_GL11_nglTexCoord2f(lib, x, y, funcPtr)
 {
-	checkNoList(curList);
+	if(!recordingImmediate) checkNoList(curList);
 	var curPos = immediateModeData.texCoordPos;
 	if(curPos > immediateModeData.texCoordBuf.length)
 	{
@@ -1603,7 +1669,7 @@ function Java_org_lwjgl_opengl_GL11_nglVertex2f(lib, x, y, funcPtr)
 
 function Java_org_lwjgl_opengl_GL11_nglVertex3f(lib, x, y, z, funcPtr)
 {
-	checkNoList(curList);
+	if(!recordingImmediate) checkNoList(curList);
 	immediateModeData.vertexBuf[immediateModeData.vertexPos++] = x;
 	immediateModeData.vertexBuf[immediateModeData.vertexPos++] = y;
 	immediateModeData.vertexBuf[immediateModeData.vertexPos++] = z;
@@ -1620,6 +1686,13 @@ function Java_org_lwjgl_opengl_GL11_nglVertex3f(lib, x, y, z, funcPtr)
 
 function Java_org_lwjgl_opengl_GL11_nglEnd(lib, funcPtr)
 {
+    if(recordingImmediate)
+    {
+        recordingImmediate = false;
+        var recorded = captureImmediateBatch();
+        curList.push({f: drawArraysInList, a: [recorded], batch: recorded});
+        return;
+    }
     checkNoList(curList);
     var count = immediateModeData.vertexPos / 3;
 
@@ -2016,6 +2089,7 @@ export default {
 	Java_org_lwjgl_opengl_GL11_nglGetFloatv,
 	Java_org_lwjgl_opengl_GL11_nglFogfv,
 	Java_org_lwjgl_opengl_GL11_nglGetTexLevelParameteriv,
+	Java_org_lwjgl_opengl_GL11_nglGetTexParameteriv,
 	Java_org_lwjgl_opengl_GL11_nglNormal3f,
 	Java_org_lwjgl_opengl_GL11_nglFogi,
 	Java_org_lwjgl_opengl_GL11_nglFogf,
