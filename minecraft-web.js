@@ -50,16 +50,13 @@ const JARS = [
  * Mods shipped with the launcher. There is no upload button, so this is the whole mod
  * list — add a jar here and next to it in the repo to ship it.
  *
- * WARNING: btwce-3.1.1.jar stops the game from starting. It is bundled here by request,
- * but it is compiled to Java 17 bytecode and declares `java >=17 <=21`, while CheerpJ
- * runs Java 8 below, so Fabric Loader aborts at startup with "Incompatible mods found!"
- * and the game never reaches the menu. Raising JAVA_VERSION to 17 does not help either:
- * CheerpJ's Java 17 throws ArrayIndexOutOfBoundsException inside Fabric's own mod
- * resolver before any mod loads. Delete the line below to get a working client back.
+ * Mods must be Java 8 bytecode. CheerpJ can boot Java 17, but its Java 17 runtime throws
+ * ArrayIndexOutOfBoundsException from java.util.ArrayList inside Fabric's mod resolver,
+ * so nothing loads at all. Anything declaring `java >=17` is therefore unusable here —
+ * that includes every BTW:CE 3.x release (3.0.0 through 3.1.1 are all Java 17 bytecode).
  */
 const BUNDLED_MODS = [
   "legacy-fabric-api-1.13.5.jar",
-  "btwce-3.1.1.jar",
 ];
 
 /** The JDK CheerpJ boots. 17 is supported but breaks Fabric's mod resolver — see above. */
